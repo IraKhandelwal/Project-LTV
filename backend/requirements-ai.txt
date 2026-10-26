@@ -1,0 +1,7 @@
+# Optional dependencies for the Stage 2 crowd-count benchmark.
+# Install separately so the regular API can continue running without AI packages.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+numpy>=2.2,<3
+Pillow>=11,<13
+scipy>=1.16,<2

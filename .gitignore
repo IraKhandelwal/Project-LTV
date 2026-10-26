@@ -1,0 +1,12 @@
+# Public evaluation data and downloaded model weights are not product source files.
+/backend/data/public/
+/backend/models/*.pth
+/backend/reports/csrnet-public-benchmark/
+/backend/reports/dmcount-public-benchmark/
+/backend/reports/dmcount-public-benchmark-corrected/
+/backend/reports/mrcnet-dlr-reproduction/
+/backend/reports/mrcnet-dlr-reproduction-v1/
+/backend/reports/mrcnet-dlr-reproduction-v2/
+/backend/reports/mrcnet-validation-v3/
+__pycache__/
+*.py[cod]

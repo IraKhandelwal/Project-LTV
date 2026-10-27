@@ -1,0 +1,9 @@
+{
+  "model": "CSRNet; ShanghaiTech Part B checkpoint",
+  "dataset": "DLR_AerialCrowdDataset",
+  "images_evaluated": 2,
+  "mae_people_per_image": 1917.268,
+  "rmse_people_per_image": 2660.3341,
+  "mean_signed_error_people_per_image": -1844.305,
+  "scope": "Image-level count only; not persons/m\u00b2, real-time, or operational validation."
+}

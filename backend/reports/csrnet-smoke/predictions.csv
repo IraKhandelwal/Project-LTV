@@ -1,0 +1,3 @@
+image,ground_truth_people,predicted_people,absolute_error,signed_error
+I_1.jpg,3911,149.427,3761.573,-3761.573
+I_10.jpg,285,357.963,72.963,72.963

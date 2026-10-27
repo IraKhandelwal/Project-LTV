@@ -1,0 +1,14 @@
+{
+  "checkpoint": "models/mrcnet-dlr-validation-v3.pth",
+  "dataset_split": "Test",
+  "images_evaluated": 14,
+  "low_resolution": {
+    "MAE": 1980.5182857142859,
+    "mean_signed_error": 703.3217142857144
+  },
+  "high_resolution": {
+    "MAE": 7245.349857142857,
+    "mean_signed_error": 5554.902714285715
+  },
+  "note": "Diagnostic comparison only. The high-resolution output may not be calibrated for counting. The dataset split has previously been used for model comparisons."
+}

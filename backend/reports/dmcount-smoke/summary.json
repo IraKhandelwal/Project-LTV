@@ -1,0 +1,9 @@
+{
+  "model": "DM-Count; NWPU pretrained checkpoint; evaluate-only candidate",
+  "dataset": "DLR_AerialCrowdDataset",
+  "images_evaluated": 2,
+  "mae_people_per_image": 1910.8975,
+  "rmse_people_per_image": 2543.7873,
+  "mean_signed_error_people_per_image": -1910.8975,
+  "scope": "Image-level count only; not persons/m\u00b2, real-time, or operational validation."
+}

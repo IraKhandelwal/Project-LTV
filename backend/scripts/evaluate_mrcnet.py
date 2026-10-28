@@ -1,121 +1,253 @@
 #!/usr/bin/env python3
-"""Evaluate a trained MRCNet reproduction on a held-out image split."""
+"""Evaluate compatible MRCNet checkpoints on the DLR-ACD test set."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
-import math
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
+import torch.nn.functional as F
 
-from app.crowd_counting import count_people_in_annotation
 from app.mrcnet import MRCNet
+
 
 MEAN = np.asarray((0.485, 0.456, 0.406), dtype=np.float32)
 STD = np.asarray((0.229, 0.224, 0.225), dtype=np.float32)
+
 PATCH_SIZE = 256
 
+CHECKPOINTS = [
+    "mrcnet-dlr-countloss-v1.pth",
+    "mrcnet-dlr-highloss-0001.pth",
+    "mrcnet-dlr-highloss-001.pth",
+    "mrcnet-dlr-reproduction-v2.pth",
+    "mrcnet-dlr-resume-v4.pth",
+    "mrcnet-dlr-validation-v3.pth",
+]
 
-def _starts(length: int) -> list[int]:
-    # Non-overlapping tiles avoid counting people twice; PIL pads the final
-    # right/bottom tile when it extends beyond the image boundary.
-    return list(range(0, max(length, 1), PATCH_SIZE))
+
+def load_image(path: Path) -> np.ndarray:
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB")).copy()
 
 
-@torch.inference_mode()
-def predict_image(model: MRCNet, image_path: Path, device: torch.device) -> float:
-    image = Image.open(image_path).convert("RGB")
-    width, height = image.size
-    count = 0.0
-    model.eval()
-    for top in _starts(height):
-        for left in _starts(width):
-            patch = image.crop((left, top, left + PATCH_SIZE, top + PATCH_SIZE))
-            if patch.size != (PATCH_SIZE, PATCH_SIZE):
-                padded = Image.new("RGB", (PATCH_SIZE, PATCH_SIZE))
-                padded.paste(patch, (0, 0))
+def ground_truth_count(path: Path) -> int:
+    with Image.open(path) as image:
+        annotation = np.asarray(image.convert("L"))
+    return int(np.count_nonzero(annotation == 255))
+
+
+def image_tensor(rgb: np.ndarray, device: torch.device) -> torch.Tensor:
+    pixels = rgb.astype(np.float32) / 255.0
+    pixels = (pixels - MEAN) / STD
+    return torch.from_numpy(
+        np.ascontiguousarray(pixels.transpose(2, 0, 1))
+    ).unsqueeze(0).to(device)
+
+
+def tile_starts(length: int, patch_size: int) -> list[int]:
+    """Cover the image, including its far edge, with no overlapping tiles."""
+    if length <= patch_size:
+        return [0]
+    starts = list(range(0, length - patch_size + 1, patch_size))
+    if starts[-1] + patch_size < length:
+        starts.append(length - patch_size)
+    return starts
+
+
+def predict_image(
+    model: MRCNet,
+    rgb: np.ndarray,
+    device: torch.device,
+) -> tuple[float, float]:
+    """Return low-map and high-map estimates summed over image patches."""
+    height, width = rgb.shape[:2]
+    low_total = 0.0
+    high_total = 0.0
+    low_covered = 0
+    high_covered = 0
+
+    y_starts = tile_starts(height, PATCH_SIZE)
+    x_starts = tile_starts(width, PATCH_SIZE)
+
+    for top in y_starts:
+        for left in x_starts:
+            patch = rgb[
+                top:min(top + PATCH_SIZE, height),
+                left:min(left + PATCH_SIZE, width),
+            ]
+
+            patch_height, patch_width = patch.shape[:2]
+
+            # Pad only at the bottom/right for model compatibility.
+            if patch_height != PATCH_SIZE or patch_width != PATCH_SIZE:
+                padded = np.zeros(
+                    (PATCH_SIZE, PATCH_SIZE, 3), dtype=np.uint8
+                )
+                padded[:patch_height, :patch_width] = patch
                 patch = padded
-            pixels = np.asarray(patch, dtype=np.float32) / 255.0
-            pixels = (pixels - MEAN) / STD
-            tensor = torch.from_numpy(pixels.transpose(2, 0, 1).copy()).unsqueeze(0).to(device)
-            low_density, _ = model(tensor)
-            count += float(low_density.sum().cpu())
-    return count
+
+            tensor = image_tensor(patch, device)
+
+            with torch.inference_mode():
+                low_density, high_density = model(tensor)
+
+            # Ignore padded areas when summing the high-resolution map.
+            high_map = high_density[0, 0]
+            high_map = high_map[:patch_height, :patch_width]
+            high_total += float(high_map.sum().item())
+
+            # The low-resolution map is 1/4 of the input width/height.
+            # Scale the valid region to the corresponding low-map dimensions.
+            low_map = low_density[0, 0]
+            valid_h = max(1, round(patch_height / 4))
+            valid_w = max(1, round(patch_width / 4))
+            low_total += float(low_map[:valid_h, :valid_w].sum().item())
+
+            low_covered += patch_height * patch_width
+            high_covered += patch_height * patch_width
+
+    return low_total, high_total
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--test-dir", type=Path, required=True,
-                        help="Held-out split with Images/ and Annotation/ folders")
-    parser.add_argument("--weights", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("reports/mrcnet-dlr-reproduction"))
-    parser.add_argument("--image-names", nargs="+", default=None,
-                        help="Evaluate only named images, for example a validation event group")
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/public/dlr-acd/DLR_AerialCrowdDataset/Test"),
+    )
+    parser.add_argument("--models-dir", type=Path, default=Path("models"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("reports/mrcnet-evaluation")
+    )
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument(
+        "--checkpoints", nargs="*", default=CHECKPOINTS,
+        help="Checkpoint filenames located in --models-dir",
+    )
     args = parser.parse_args()
-    image_dir = args.test_dir / "Images"
-    annotation_dir = args.test_dir / "Annotation"
-    if not image_dir.is_dir() or not annotation_dir.is_dir():
-        parser.error("test-dir must contain Images/ and Annotation/ folders")
-    if not args.weights.is_file():
-        parser.error(f"Checkpoint does not exist: {args.weights}")
-    device = torch.device(args.device)
-    model = MRCNet().to(device)
-    checkpoint = torch.load(args.weights, map_location=device, weights_only=True)
-    state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    model.load_state_dict(state, strict=True)
-    images = sorted(path for path in image_dir.iterdir()
-                    if path.suffix.lower() in {".jpg", ".jpeg", ".png"})
-    if args.image_names:
-        requested = set(args.image_names)
-        images = [path for path in images if path.name in requested]
-        missing = requested - {path.name for path in images}
-        if missing:
-            parser.error(f"Requested image(s) are missing from {image_dir}: {sorted(missing)}")
-    if args.limit:
-        images = images[:args.limit]
-    if not images:
-        parser.error("No test images found")
 
-    rows: list[dict[str, str | int | float]] = []
-    for index, image_path in enumerate(images, start=1):
-        truth = count_people_in_annotation(annotation_dir / f"{image_path.stem}.png")
-        prediction = predict_image(model, image_path, device)
-        rows.append({"image": image_path.name, "ground_truth_people": truth,
-                     "predicted_people": round(prediction, 3),
-                     "absolute_error": round(abs(prediction - truth), 3),
-                     "signed_error": round(prediction - truth, 3),
-                     "normalized_absolute_error": round(abs(prediction - truth) / truth, 6)})
-        print(f"[{index}/{len(images)}] {image_path.name}: GT={truth}, prediction={prediction:.1f}",
-              flush=True)
+    if args.device == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA was requested but is not available.")
+    device = torch.device(
+        "cuda" if args.device == "cuda" or
+        (args.device == "auto" and torch.cuda.is_available()) else "cpu"
+    )
 
-    errors = [float(row["absolute_error"]) for row in rows]
-    signed = [float(row["signed_error"]) for row in rows]
-    normalized = [float(row["normalized_absolute_error"]) for row in rows]
-    summary = {
-        "model": "Independent paper-inspired MRCNet reproduction",
-        "dataset_split": args.test_dir.name,
-        "images_evaluated": len(rows),
-        "mae_people_per_image": sum(errors) / len(errors),
-        "rmse_people_per_image": math.sqrt(sum(value * value for value in errors) / len(errors)),
-        "mean_signed_error_people_per_image": sum(signed) / len(signed),
-        "mnae": sum(normalized) / len(normalized),
-        "scope": "Offline image counts; tiled inference; not persons/m², live-camera, or field validation.",
-    }
+    images_dir = args.data_dir / "Images"
+    annotations_dir = args.data_dir / "Annotation"
+    images = {p.stem: p for p in images_dir.glob("*.jpg")}
+    annotations = {p.stem: p for p in annotations_dir.glob("*.png")}
+
+    names = sorted(set(images) & set(annotations))
+    if not names:
+        parser.error("No matching test images and annotation PNGs were found.")
+
+    print(f"Device: {device}")
+    print(f"Matched test images: {len(names)}")
+    print("Ground truth: number of pixels equal to 255 in each annotation")
+    print("Note: this initial evaluator uses patch tiling; inspect results before "
+          "treating them as final benchmark metrics.")
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    with (args.output_dir / "predictions.csv").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n",
-                                                  encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    summary_rows = []
+
+    for checkpoint_name in args.checkpoints:
+        checkpoint_path = args.models_dir / checkpoint_name
+        if not checkpoint_path.is_file():
+            print(f"\nSKIP missing checkpoint: {checkpoint_path}")
+            continue
+
+        print(f"\nEvaluating: {checkpoint_name}", flush=True)
+
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        state = checkpoint.get("model_state_dict", checkpoint)
+
+        model = MRCNet().to(device)
+        try:
+            model.load_state_dict(state, strict=True)
+        except Exception as exc:
+            print(f"SKIP incompatible checkpoint: {exc}")
+            del model
+            continue
+
+        model.eval()
+        rows = []
+
+        for index, name in enumerate(names, start=1):
+            rgb = load_image(images[name])
+            truth = ground_truth_count(annotations[name])
+            low_prediction, high_prediction = predict_image(model, rgb, device)
+
+            rows.append({
+                "image": name,
+                "ground_truth": truth,
+                "low_prediction": low_prediction,
+                "high_prediction": high_prediction,
+                "low_absolute_error": abs(low_prediction - truth),
+                "high_absolute_error": abs(high_prediction - truth),
+                "width": rgb.shape[1],
+                "height": rgb.shape[0],
+            })
+
+            print(
+                f"  [{index}/{len(names)}] {name}: GT={truth}, "
+                f"low={low_prediction:.1f}, high={high_prediction:.1f}",
+                flush=True,
+            )
+
+        for output_key in ("low_prediction", "high_prediction"):
+            errors = np.asarray(
+                [row[output_key] - row["ground_truth"] for row in rows],
+                dtype=np.float64,
+            )
+            mae = float(np.mean(np.abs(errors)))
+            rmse = float(np.sqrt(np.mean(errors ** 2)))
+            bias = float(np.mean(errors))
+
+            summary_rows.append({
+                "checkpoint": checkpoint_name,
+                "output": output_key,
+                "images": len(rows),
+                "MAE": mae,
+                "RMSE": rmse,
+                "bias_prediction_minus_GT": bias,
+            })
+
+            print(
+                f"  {output_key}: MAE={mae:.2f}, RMSE={rmse:.2f}, "
+                f"bias={bias:.2f}",
+                flush=True,
+            )
+
+        per_image_path = args.output_dir / f"{checkpoint_path.stem}_per_image.csv"
+        with per_image_path.open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    if summary_rows:
+        summary_path = args.output_dir / "summary.csv"
+        with summary_path.open("w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(summary_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(summary_rows)
+
+        print(f"\nSummary saved to: {summary_path}")
+        print(f"Per-image reports saved in: {args.output_dir}")
+    else:
+        print("No compatible checkpoints were evaluated.")
 
 
 if __name__ == "__main__":

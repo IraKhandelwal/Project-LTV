@@ -163,6 +163,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=2,
                         help="Small default for CPU-only machines; paper used 60")
     parser.add_argument("--learning-rate", type=float, default=3e-6)
+    parser.add_argument("--high-loss-weight", type=float, default=1e-4,
+                        help="Weight for high-resolution density loss")
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="Resume model weights from a checkpoint")
     parser.add_argument("--samples-per-tile", type=int, default=2)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--exclude-image-ids", type=int, nargs="*", default=[],
@@ -196,10 +200,32 @@ def main() -> None:
                                     replacement=True, generator=sampler_generator)
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler,
                         num_workers=0, pin_memory=device.type == "cuda")
-    model = MRCNet(args.vgg16_weights).to(device)
+    checkpoint = {}
+    if args.resume is not None:
+        if not args.resume.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        state = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
+        model = MRCNet().to(device)
+        model.load_state_dict(state, strict=True)
+        start_epoch = int(checkpoint.get("epoch", 0))
+        print(f"Loaded checkpoint: {args.resume}", flush=True)
+        print(f"Checkpoint epoch: {start_epoch}", flush=True)
+    else:
+        model = MRCNet(args.vgg16_weights).to(device)
+        start_epoch = 0
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    if "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        print("Restored optimizer state.", flush=True)
+    elif args.resume is not None:
+        print("No saved optimizer state; starting with a fresh optimizer.", flush=True)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    for epoch in range(args.epochs):
+    if args.resume is not None and args.output.resolve() == args.resume.resolve():
+        raise ValueError("Use a different --output path to protect the source checkpoint.")
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
         total_loss = 0.0
         for step, (images, low_target, high_target) in enumerate(loader, start=1):
@@ -209,7 +235,7 @@ def main() -> None:
             low_prediction, high_prediction = model(images)
             low_loss = F.mse_loss(low_prediction, low_target)
             high_loss = F.mse_loss(high_prediction, high_target)
-            loss = low_loss + 1e-4 * high_loss
+            loss = low_loss + args.high_loss_weight * high_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -219,7 +245,9 @@ def main() -> None:
                       flush=True)
         average = total_loss / max(1, len(loader))
         print(f"epoch {epoch + 1}/{args.epochs}: loss={average:.6f}", flush=True)
-        torch.save({"model_state_dict": model.state_dict(), "epoch": epoch + 1,
+        torch.save({"model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "epoch": epoch + 1,
                     "training_kind": "independent paper-inspired reproduction",
                     "excluded_validation_image_ids": sorted(excluded_ids),
                     "balanced_tile_target_shares": target_share,

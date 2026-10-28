@@ -1,6 +1,9 @@
-# Public evaluation data and downloaded model weights are not product source files.
+# Public evaluation data and downloaded model weights
 /backend/data/public/
 /backend/models/*.pth
+/backend/*.pt
+
+# Generated benchmark reports
 /backend/reports/csrnet-public-benchmark/
 /backend/reports/dmcount-public-benchmark/
 /backend/reports/dmcount-public-benchmark-corrected/
@@ -8,5 +11,42 @@
 /backend/reports/mrcnet-dlr-reproduction-v1/
 /backend/reports/mrcnet-dlr-reproduction-v2/
 /backend/reports/mrcnet-validation-v3/
+/backend/reports/mrcnet-countloss-v1/
+/backend/reports/mrcnet-evaluation/
+/backend/reports/mrcnet-highloss-0001-test/
+/backend/reports/mrcnet-highloss-001-test/
+/backend/reports/mrcnet-v3-test/
+/backend/reports/mrcnet-v4-comparison/
+
+# Python environments and caches
+.venv/
+.venv-*/
+venv/
 __pycache__/
 *.py[cod]
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+
+# Frontend dependencies and build outputs
+node_modules/
+dist/
+.vite/
+
+# Training outputs and backup files
+/backend/runs/
+/backend/scripts/*.backup
+/backend/scripts/*.before_loss_weight
+/backend/scripts/*.before_restore
+
+# Accidental files in the project root
+/(fixed)
+/= Path("reports")
